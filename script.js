@@ -1,18 +1,15 @@
+// script.js — cleaned single-file version with AR + loader + Gemini hooks
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { ARButton } from 'three/addons/webxr/ARButton.js';
 
-/* ------------- CONFIG ------------- */
-/* Set BACKEND to your backend public URL (ngrok or host) */
-const BACKEND = "https://invulnerable-kirstie-unregaled.ngrok-free.dev";
- // <- change if needed
-
-/* Put your Gemini/Generative API key here */
-const YOUR_API_KEY = "AIzaSyCjFlb6aQU5XVsZuBKxtnwylhCJTmBB3CU"; // <-- REPLACE with your Google API key (keep secret)
+/* --------- CONFIG --------- */
+const BACKEND = "https://invulnerable-kirstie-unregaled.ngrok-free.dev"; // set to your backend/ngrok
+const YOUR_API_KEY = "AIzaSyCjFlb6aQU5XVsZuBKxtnwylhCJTmBB3CU"; // put Gemini API key here if you want analysis in-browser
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${YOUR_API_KEY}`;
 
-/* ------------- THREE SETUP ------------- */
+/* --------- THREE setup --------- */
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.01, 20);
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -21,15 +18,16 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.xr.enabled = true;
 document.getElementById('container').appendChild(renderer.domElement);
 
-const ambientLight = new THREE.AmbientLight(0xffffff, 1);
+const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
 scene.add(ambientLight);
-const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-directionalLight.position.set(1,1,1);
-scene.add(directionalLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(1,1,1);
+scene.add(dirLight);
 
+/* --------- Globals --------- */
 let model = null;
 let tumorMarker = null;
-let loader = new GLTFLoader();
+const loader = new GLTFLoader();
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 const originalScale = 0.3;
@@ -37,37 +35,42 @@ let isMarkingTumor = false;
 let tumorVisible = false;
 let modelPlaced = false;
 let isARMode = false;
+let hitTestSource = null;
+let hitTestSourceRequested = false;
+const reticle = createReticle(); // ring reticle for AR placement
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.minDistance = 1;
+controls.maxDistance = 10;
+camera.position.set(0,0,3);
 
-/* Rotation toggles */
-let autoRotateLR = false;
-let autoRotateUD = false;
-let coloredRegionsOn = false;
-
-/* Loading screen element */
+/* --------- helper DOM elems --------- */
 const loadingScreen = document.getElementById('loadingScreen');
+const convertStatus = document.getElementById('convertStatus');
 
-/* ---------------- GLB LOADER ---------------- */
-async function loadGLBUrl(url) {
+/* --------- GLB load helper (single canonical implementation) --------- */
+function loadGLBUrl(url) {
   return new Promise((resolve, reject) => {
     loader.load(url, (gltf) => {
       if (model) scene.remove(model);
       model = gltf.scene;
-      // center + scale
+      // center and scale model
       const box = new THREE.Box3().setFromObject(model);
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
       model.position.sub(center);
-      const maxDim = Math.max(size.x, size.y, size.z);
+      const maxDim = Math.max(size.x, size.y, size.z) || 1;
       const scale = originalScale / maxDim;
-      model.scale.multiplyScalar(scale);
+      model.scale.setScalar(scale);
       model.visible = true;
       scene.add(model);
-      createTumorMarker();
+      ensureTumorMarker();
       if (loadingScreen) loadingScreen.classList.add('hidden');
       resolve(model);
     }, (progress) => {
       if (progress && progress.total) {
-        const percent = (progress.loaded / progress.total * 100).toFixed(0);
+        const percent = Math.round(progress.loaded / progress.total * 100);
         const txt = document.querySelector('.loading-text');
         if (txt) txt.textContent = `Loading Brain Model... ${percent}%`;
       }
@@ -75,307 +78,275 @@ async function loadGLBUrl(url) {
   });
 }
 
-/* --------------- Tumor marker --------------- */
-function createTumorMarker() {
+/* --------- Reticle (AR hit placement) --------- */
+function createReticle() {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.12, 0.18, 32),
+    new THREE.MeshBasicMaterial({ color: 0x00bcd4, side: THREE.DoubleSide })
+  );
+  ring.rotation.x = -Math.PI/2;
+  ring.visible = false;
+  ring.matrixAutoUpdate = false;
+  scene.add(ring);
+  return ring;
+}
+
+/* --------- Tumor marker --------- */
+function ensureTumorMarker() {
   if (tumorMarker) return;
   const geo = new THREE.SphereGeometry(1, 32, 32);
-  const mat = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 0.5, transparent:true, opacity:0.8 });
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 0.5, transparent:true, opacity:0.9 });
   tumorMarker = new THREE.Mesh(geo, mat);
   tumorMarker.scale.set(0.05,0.05,0.05);
   tumorMarker.visible = false;
   scene.add(tumorMarker);
 }
 
-/* --------------- Controls --------------- */
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true; controls.dampingFactor = 0.05;
-controls.minDistance = 1; controls.maxDistance = 10;
-camera.position.set(0,0,3);
-
-/* --------------- AR Button --------------- */
-const arButton = document.getElementById('ar-button');
+/* --------- AR Button & hit-test setup --------- */
+const arButtonEl = document.getElementById('ar-button');
 let customARButton = null;
 if ('xr' in navigator) {
-  navigator.xr.isSessionSupported('immersive-ar').then(supported => {
+  navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
     if (supported) {
-      if (arButton) arButton.style.display = 'block';
+      if (arButtonEl) arButtonEl.style.display = 'block';
       customARButton = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'], optionalFeatures: ['dom-overlay'], domOverlay: { root: document.body } });
-      customARButton.style.display = 'none';
+      customARButton.style.display = 'none'; // hide internal button, we'll trigger it via arButtonEl
       document.body.appendChild(customARButton);
-      if (arButton) arButton.addEventListener('click', () => customARButton.click());
-      renderer.xr.addEventListener('sessionstart', () => {
-        isARMode = true; modelPlaced = false;
-        if (arButton) arButton.textContent = 'Exit AR';
-        const instr = document.getElementById('arInstructions'); if (instr) instr.classList.remove('hidden');
-        if (model) model.visible = false;
-      });
-      renderer.xr.addEventListener('sessionend', () => {
-        isARMode = false;
-        if (arButton) arButton.textContent = 'Start AR Experience';
-        if (model) { model.visible = true; model.position.set(0,0,0); }
-      });
+      arButtonEl.addEventListener('click', () => customARButton.click());
+      renderer.xr.addEventListener('sessionstart', onSessionStart);
+      renderer.xr.addEventListener('sessionend', onSessionEnd);
     } else {
-      if (arButton) { arButton.textContent = 'AR Not Supported on This Device'; arButton.style.display='block'; arButton.disabled=true; }
+      if (arButtonEl) { arButtonEl.textContent = 'AR Not Supported on This Device'; arButtonEl.style.display='block'; arButtonEl.disabled=true; }
     }
-  }).catch(()=>{ if (arButton) { arButton.textContent = 'Error Checking AR Support'; arButton.style.display='block'; arButton.disabled=true; }});
+  }).catch((e) => {
+    console.warn('XR check error', e);
+    if (arButtonEl) { arButtonEl.textContent = 'AR Unavailable'; arButtonEl.style.display='block'; arButtonEl.disabled=true; }
+  });
+} else {
+  if (arButtonEl) { arButtonEl.textContent = 'WebXR not available'; arButtonEl.style.display='block'; arButtonEl.disabled=true; }
 }
 
-/* --------------- Backend functions --------------- */
+function onSessionStart() {
+  isARMode = true;
+  modelPlaced = false;
+  hitTestSourceRequested = false;
+  if (model) model.visible = false;
+  const instr = document.getElementById('arInstructions');
+  if (instr) instr.classList.remove('hidden');
+}
+
+function onSessionEnd() {
+  isARMode = false;
+  hitTestSourceRequested = false;
+  hitTestSource = null;
+  reticle.visible = false;
+  if (model) { model.visible = true; model.position.set(0,0,0); }
+}
+
+/* Controller select (tap to place / tap to mark) */
+const controller = renderer.xr.getController(0);
+controller.addEventListener('select', () => {
+  // if reticle visible and model not placed => place model
+  if (reticle.visible && model && !modelPlaced) {
+    model.position.setFromMatrixPosition(reticle.matrix);
+    model.quaternion.setFromRotationMatrix(reticle.matrix);
+    model.visible = true;
+    modelPlaced = true;
+    const instr = document.getElementById('arInstructions');
+    if (instr) setTimeout(()=>instr.classList.add('hidden'), 1200);
+    return;
+  }
+  // otherwise if marking mode and model placed, raycast from controller forward
+  if (modelPlaced && isMarkingTumor && model) {
+    const tempMat = new THREE.Matrix4();
+    tempMat.identity().extractRotation(controller.matrixWorld);
+    raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+    raycaster.ray.direction.set(0,0,-1).applyMatrix4(tempMat);
+    const intersects = raycaster.intersectObject(model, true);
+    if (intersects.length > 0) {
+      handleTumorMarking(intersects[0].point);
+    }
+  }
+});
+scene.add(controller);
+
+/* --------- Convert & load backend integration --------- */
 async function startConversion(patientId) {
-  const url = `${BACKEND}/convert?patient_id=${encodeURIComponent(patientId)}`;
-  const r = await fetch(url, { method: 'POST' });
-  if (!r.ok) throw new Error('Failed to request conversion');
-  const j = await r.json();
+  const res = await fetch(`${BACKEND}/convert?patient_id=${encodeURIComponent(patientId)}`, { method: 'POST' });
+  if (!res.ok) throw new Error('convert call failed: ' + res.status);
+  const j = await res.json();
   return j.job_id;
 }
 
 async function pollJob(jobId, onUpdate = null) {
   while (true) {
     const r = await fetch(`${BACKEND}/job/${jobId}`);
-    if (!r.ok) throw new Error('Job poll failed');
+    if (!r.ok) throw new Error('job poll failed: ' + r.status);
     const j = await r.json();
     if (onUpdate) onUpdate(j);
     if (j.status === 'done' || j.status === 'failed') return j;
-    await new Promise(res => setTimeout(res, 1500));
+    await new Promise(resolve => setTimeout(resolve, 1500));
   }
 }
 
 async function convertAndLoad(patientId) {
-  const statusEl = document.getElementById('convertStatus');
+  if (!patientId) return alert('Enter patient id');
   try {
-    statusEl.textContent = 'Starting...';
+    convertStatus.textContent = 'Starting...';
     const jobId = await startConversion(patientId);
-    statusEl.textContent = 'Job started: ' + jobId;
-    const job = await pollJob(jobId, j => statusEl.textContent = `Status: ${j.status}`);
+    convertStatus.textContent = 'Job: ' + jobId;
+    const job = await pollJob(jobId, j => convertStatus.textContent = `Status: ${j.status}`);
     if (job.status === 'done' && job.result_path) {
-      statusEl.textContent = 'Conversion done, loading model...';
+      convertStatus.textContent = 'Loading model...';
       await loadGLBFromResult(job.result_path);
-      statusEl.textContent = 'Loaded successfully';
+      convertStatus.textContent = 'Loaded';
     } else {
-      statusEl.textContent = 'Conversion failed';
-      console.error('Job failed:', job);
+      convertStatus.textContent = 'Conversion failed';
+      console.error('job failed', job);
     }
   } catch (err) {
     console.error(err);
-    document.getElementById('convertStatus').textContent = 'Error: ' + err.message;
+    convertStatus.textContent = 'Error: ' + (err.message||err);
   }
 }
 
+/* Helper that accepts backend result_path like "/static/ID.glb" */
 async function loadGLBFromResult(resultPath) {
-  // resultPath returned by backend usually like "/static/OAS1_0004_MR1.glb"
   const url = resultPath.startsWith('http') ? resultPath : (BACKEND + resultPath);
   if (loadingScreen) loadingScreen.classList.remove('hidden');
-  await loadGLBUrl(url);
+  try {
+    await loadGLBUrl(url);
+  } finally {
+    setTimeout(()=> loadingScreen?.classList.add('hidden'), 200);
+  }
 }
 
-/* Hook conversion UI */
-document.getElementById('convertBtn').addEventListener('click', () => {
+/* hook conversion button */
+document.getElementById('convertBtn')?.addEventListener('click', () => {
   const pid = document.getElementById('patientIdInput').value.trim();
-  if (!pid) return alert('Enter patient id like OAS1_0004_MR1');
   convertAndLoad(pid);
 });
 
-/* --------------- Mouse marking / raycast --------------- */
+/* --------- Mouse click marking for non-AR --------- */
 window.addEventListener('click', (ev) => {
   if (!isMarkingTumor || !model || isARMode) return;
   mouse.x = (ev.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(ev.clientY / window.innerHeight) * 2 + 1;
   raycaster.setFromCamera(mouse, camera);
   const intersects = raycaster.intersectObject(model, true);
-  if (intersects.length > 0) {
-    const hit = intersects[0];
-    const meshName = hit.object?.name || hit.object?.parent?.name || null;
-    handleTumorMarking(hit.point, meshName);
-  }
+  if (intersects.length > 0) handleTumorMarking(intersects[0].point);
 });
 
-function handleTumorMarking(worldPoint, regionName = null) {
-  if (!tumorMarker) createTumorMarker();
+/* Marking handler */
+function handleTumorMarking(worldPoint) {
+  ensureTumorMarker();
   tumorMarker.position.copy(worldPoint);
   tumorMarker.visible = true;
   tumorVisible = true;
-  if (document.getElementById('toggleTumorBtn')) document.getElementById('toggleTumorBtn').textContent = 'Hide Tumor';
+  document.getElementById('toggleTumorBtn').textContent = 'Hide Tumor';
   document.getElementById('posX').textContent = worldPoint.x.toFixed(3);
   document.getElementById('posY').textContent = worldPoint.y.toFixed(3);
   document.getElementById('posZ').textContent = worldPoint.z.toFixed(3);
-  callGeminiAPI(worldPoint, regionName);
+  callGeminiAPI(worldPoint).catch(()=>{/*ignore*/});
   isMarkingTumor = false;
   document.getElementById('markTumorBtn')?.classList.remove('active');
 }
 
-/* --------------- Buttons (mark, toggle tumor, reset) --------------- */
-document.getElementById('markTumorBtn').addEventListener('click', () => {
+/* --------- Buttons behavior --------- */
+document.getElementById('markTumorBtn')?.addEventListener('click', () => {
   isMarkingTumor = !isMarkingTumor;
   const btn = document.getElementById('markTumorBtn');
-  if (isMarkingTumor) { btn.textContent = 'Marking... (Click on Brain)'; btn.classList.add('active'); controls.enabled = false; }
-  else { btn.textContent = 'Mark Tumor'; btn.classList.remove('active'); controls.enabled = true; }
+  if (isMarkingTumor) { btn.textContent = 'Marking... (Click on Brain)'; btn.classList.add('active'); controls.enabled=false; }
+  else { btn.textContent = 'Mark Tumor'; btn.classList.remove('active'); controls.enabled=true; }
 });
-
-document.getElementById('toggleTumorBtn').addEventListener('click', () => {
+document.getElementById('toggleTumorBtn')?.addEventListener('click', () => {
   tumorVisible = !tumorVisible;
   if (tumorMarker) tumorMarker.visible = tumorVisible;
   document.getElementById('toggleTumorBtn').textContent = tumorVisible ? 'Hide Tumor' : 'Show Tumor';
 });
-
-document.getElementById('resetViewBtn').addEventListener('click', () => {
-  if (tumorMarker) { tumorMarker.visible = false; tumorVisible = false; document.getElementById('toggleTumorBtn').textContent = 'Show Tumor'; }
-  document.getElementById('posX').textContent = '---';
-  document.getElementById('posY').textContent = '---';
-  document.getElementById('posZ').textContent = '---';
-  document.getElementById('tumorAnalysisResult').textContent = 'No tumor marked.';
-  if (isARMode && model) { modelPlaced = false; model.visible = false; }
+document.getElementById('resetViewBtn')?.addEventListener('click', () => {
+  if (tumorMarker) { tumorMarker.visible=false; tumorVisible=false; document.getElementById('toggleTumorBtn').textContent='Show Tumor'; }
+  document.getElementById('posX').textContent='---';
+  document.getElementById('posY').textContent='---';
+  document.getElementById('posZ').textContent='---';
+  document.getElementById('tumorAnalysisResult').textContent='No tumor marked.';
+  if (isARMode && model) { modelPlaced=false; model.visible=false; }
   else { camera.position.set(0,0,3); controls.target.set(0,0,0); controls.update(); if (model) { model.rotation.set(0,0,0); model.position.set(0,0,0); } }
 });
-
-/* --------------- Slider for scale --------------- */
-document.getElementById('scaleSlider').addEventListener('input', (e) => {
-  const val = parseFloat(e.target.value);
-  document.getElementById('scaleValue').textContent = val.toFixed(1) + 'x';
-  if (model) {
-    const base = originalScale * val;
-    model.scale.setScalar(base);
-  }
+document.getElementById('scaleSlider')?.addEventListener('input', (e) => {
+  const val = parseFloat(e.target.value); document.getElementById('scaleValue').textContent = val.toFixed(1)+'x';
+  if (model) model.scale.setScalar(originalScale * val);
 });
 
-/* --------------- Auto-rotate toggles --------------- */
-document.getElementById('autoRotateLR').addEventListener('click', () => {
-  autoRotateLR = !autoRotateLR;
-  document.getElementById('autoRotateLR').classList.toggle('active', autoRotateLR);
-});
-document.getElementById('autoRotateUD').addEventListener('click', () => {
-  autoRotateUD = !autoRotateUD;
-  document.getElementById('autoRotateUD').classList.toggle('active', autoRotateUD);
-});
-
-/* --------------- Colored regions toggle (if you produce colored GLBs) --------------- */
-document.getElementById('toggleColored').addEventListener('click', async () => {
-  coloredRegionsOn = !coloredRegionsOn;
-  document.getElementById('toggleColored').classList.toggle('active', coloredRegionsOn);
-  const status = document.getElementById('convertStatus');
-  if (!model) return alert('Load a model first (Convert & Load).');
-  // If you produce a separate colored GLB for the same patient, you could change URL convention:
-  // e.g. /static/OAS1_0004_MR1_colored.glb
-  // For now this toggles an imaginary alternate file name (make sure converter writes colored version)
-  try {
-    const patientId = document.getElementById('patientIdInput').value.trim();
-    if (!patientId) return alert('Enter patient ID first');
-    const suffix = coloredRegionsOn ? '_colored' : '';
-    const path = `/static/${patientId}${suffix}.glb`;
-    status.textContent = 'Loading ' + path;
-    await loadGLBFromResult(path);
-    status.textContent = 'Loaded ' + (coloredRegionsOn ? 'colored' : 'plain') + ' model';
-  } catch (err) {
-    console.warn(err);
-    document.getElementById('convertStatus').textContent = 'Could not load colored model: ' + err.message;
-  }
-});
-
-/* --------------- Gemini call (region-aware) --------------- */
-async function callGeminiAPI(position, regionName = null) {
-  const resultEl = document.getElementById('tumorAnalysisResult');
-  resultEl.textContent = 'Analyzing...';
-  if (!YOUR_API_KEY) { resultEl.textContent = 'Gemini API key not configured.'; return; }
-
-  const regionText = regionName ? `Region: ${regionName}.\n` : '';
-  const prompt = `
-A potential brain tumor has been identified at:
-X: ${position.x.toFixed(4)}, Y: ${position.y.toFixed(4)}, Z: ${position.z.toFixed(4)}.
-${regionText}
-Provide the most likely anatomical region name (short) and a one-line clinician-friendly suggestion.`;
-
+/* --------- Gemini (optional) --------- */
+async function callGeminiAPI(position) {
+  const resEl = document.getElementById('tumorAnalysisResult');
+  resEl.textContent = 'Analyzing...';
+  if (!YOUR_API_KEY) { resEl.textContent = 'Gemini key not configured.'; return; }
+  const prompt = `A potential brain tumor has been identified at X:${position.x.toFixed(4)} Y:${position.y.toFixed(4)} Z:${position.z.toFixed(4)}. Respond with likely anatomical region (short).`;
   const requestBody = { contents: [{ parts: [{ text: prompt }] }], safetySettings: [] };
   try {
-    const res = await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody)
-    });
-    if (!res.ok) throw new Error('Gemini API error');
-    const data = await res.json();
-    const aiText = data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response';
-    resultEl.textContent = aiText.trim();
-    // optional TTS
-    speakText(aiText.trim());
+    const r = await fetch(API_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(requestBody) });
+    if (!r.ok) throw new Error('API error');
+    const data = await r.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response';
+    resEl.textContent = text.trim();
+    speakText(text.trim());
   } catch (err) {
     console.error(err);
-    resultEl.textContent = 'Gemini analysis failed.';
+    resEl.textContent = 'Analysis failed.';
   }
 }
 
-/* --------------- Text-to-speech --------------- */
+/* TTS */
 function speakText(text) {
   if (!('speechSynthesis' in window)) return;
   window.speechSynthesis.cancel();
   const ut = new SpeechSynthesisUtterance(text);
-  ut.lang = 'en-US';
-  ut.rate = 0.95;
+  ut.lang = 'en-US'; ut.rate = 0.95;
   const voices = window.speechSynthesis.getVoices();
-  ut.voice = voices.find(v => v.lang === 'en-US' && v.name.includes('Google')) || voices[0] || null;
+  ut.voice = voices.find(v=>v.lang.includes('en-US') && v.name.includes('Google')) || voices[0] || null;
   window.speechSynthesis.speak(ut);
 }
 
-/* --------------- Animation / render --------------- */
-function render(timestamp, frame) {
-  // pulse tumor marker
+/* --------- Render loop with AR hit-test handling --------- */
+function render(time, frame) {
+  // pulse effect on tumor marker
   if (tumorMarker && tumorMarker.visible) {
-    tumorMarker.material.emissiveIntensity = 0.3 + Math.abs(Math.sin(Date.now()*0.005)) * 0.3;
+    tumorMarker.material.emissiveIntensity = 0.3 + Math.abs(Math.sin(time*0.002)) * 0.4;
   }
 
-  // auto-rotate when model loaded and not AR
-  if (model && !isARMode) {
-    if (autoRotateLR) model.rotation.y += 0.01;
-    if (autoRotateUD) model.rotation.x += 0.008;
-  }
-
+  // AR hit-test
   if (frame && isARMode) {
-    // AR hit testing kept out for brevity (if you want, reuse your earlier code)
-  } else {
-    controls.update();
-  }
+    const session = renderer.xr.getSession();
+    const referenceSpace = renderer.xr.getReferenceSpace();
+    if (!hitTestSourceRequested && session) {
+      session.requestReferenceSpace('viewer').then((viewerSpace) => {
+        session.requestHitTestSource({ space: viewerSpace }).then((source) => {
+          hitTestSource = source;
+        });
+      });
+      hitTestSourceRequested = true;
+    }
+    if (hitTestSource && !modelPlaced) {
+      const hits = frame.getHitTestResults(hitTestSource);
+      if (hits.length > 0) {
+        const hit = hits[0];
+        const pose = hit.getPose(referenceSpace);
+        if (pose) {
+          reticle.visible = true;
+          reticle.matrix.fromArray(pose.transform.matrix);
+        }
+      } else reticle.visible = false;
+    }
+  } else controls.update();
 
   renderer.render(scene, camera);
 }
+renderer.setAnimationLoop(render);
 
-function animate() {
-  renderer.setAnimationLoop(render);
-}
-animate();
-
-/* --------------- Helper to load path returned by backend --------------- */
-async function loadGLBFromResult(resultPath) {
-  const path = resultPath.startsWith('http') ? resultPath : (BACKEND + resultPath);
-  if (loadingScreen) loadingScreen.classList.remove('hidden');
-  try {
-    await loadGLBUrl(path);
-  } finally {
-    if (loadingScreen) setTimeout(()=>loadingScreen.classList.add('hidden'), 300);
-  }
-}
-
-/* expose simple load helper used above */
-function loadGLBUrl(url) {
-  return new Promise((resolve, reject) => {
-    loader.load(url, (gltf) => {
-      if (model) scene.remove(model);
-      model = gltf.scene;
-      const box = new THREE.Box3().setFromObject(model);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      model.position.sub(center);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const scale = originalScale / maxDim;
-      model.scale.multiplyScalar(scale);
-      model.visible = true;
-      scene.add(model);
-      createTumorMarker();
-      resolve(model);
-    }, undefined, (err) => reject(err));
-  });
-}
-
-/* --------------- Resize handler --------------- */
+/* --------- Resize handler --------- */
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth/window.innerHeight;
-  camera.updateProjectionMatrix();
+  camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
